@@ -89,11 +89,15 @@ module conv_block #(
     reg                        mac_valid_r;
     reg                        bias_valid_r;
     reg signed [DATA_W-1:0]    sr_pipe_r;
+    reg                        mac_valid_r2;
+    reg                        bias_valid_r2;
+    
 
     wire signed [31:0] mul_op_a = $signed({{8{sr_pipe_r[DATA_W-1]}}, sr_pipe_r});
     wire signed [31:0] mul_op_b = $signed({{20{rom_data[11]}}, rom_data});
-    wire signed [31:0] mul_res  = mul_op_a * mul_op_b;
-    wire signed [31:0] shifted_res = mul_res >>> 8;
+    reg signed [31:0] mul_res_r;
+    always @(posedge clk) mul_res_r <= mul_op_a * mul_op_b;
+    wire signed [31:0] shifted_res = mul_res_r >>> 8;
 
     wire signed [DATA_W-1:0] relu_comb = accum[pool_oc][31] ? {DATA_W{1'b0}} : accum[pool_oc];
 
@@ -165,16 +169,18 @@ module conv_block #(
                         mac_valid <= 1'b0;
                         bias_valid<= 1'b0;
                     end
-
+                    
                     sr_pipe_r    <= sr_pipe;
                     mac_valid_r  <= mac_valid;
+                    mac_valid_r2 <= mac_valid_r;
                     bias_valid_r <= bias_valid;
-
-                    if (mac_valid_r) begin
+                    bias_valid_r2 <= bias_valid_r;
+                    
+                    if (mac_valid_r2) begin
                         accum[mac_oc] <= accum[mac_oc] + shifted_res;
                     end
 
-                    if (bias_valid_r) begin
+                    if (bias_valid_r2) begin
                         accum[mac_oc] <= accum[mac_oc] + $signed({{20{rom_data[11]}}, rom_data});
                         pool_oc <= mac_oc;
                         state   <= ST_POOL;
