@@ -45,6 +45,8 @@ module dense_layer #(
 
     reg                        mac_valid_r;
     reg                        bias_valid_r;
+    reg                        mac_valid_r2;
+    reg                        bias_valid_r2;
     reg signed [DATA_W-1:0]    x_pipe_r;
 
     reg signed [31:0] accum     [0:OUT_SIZE-1];
@@ -54,8 +56,11 @@ module dense_layer #(
     
     wire signed [31:0] mul_op_a = $signed({{8{x_pipe_r[DATA_W-1]}}, x_pipe_r});
     wire signed [31:0] mul_op_b = $signed({{20{rom_data[11]}}, rom_data});
-    wire signed [31:0] mul_res  = mul_op_a * mul_op_b;
-    wire signed [31:0] shifted_res = mul_res >>> 8;
+    //wire signed [31:0] mul_res  = mul_op_a * mul_op_b;
+    //wire signed [31:0] shifted_res = mul_res >>> 8;
+    reg signed [31:0] mul_res_r;
+    always @(posedge clk) mul_res_r <= mul_op_a * mul_op_b;
+    wire signed [31:0] shifted_res = mul_res_r >>> 8;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -128,14 +133,16 @@ module dense_layer #(
                     // --- Stage 2: Align with BRAM Latency ---
                     x_pipe_r     <= x_pipe;
                     mac_valid_r  <= mac_valid;
+                    mac_valid_r2  <= mac_valid_r;
                     bias_valid_r <= bias_valid;
+                    bias_valid_r2 <= bias_valid_r;
 
                     // --- Stage 3: Execute Arithmetic ---
-                    if (mac_valid_r) begin
+                    if (mac_valid_r2) begin
                         accum[oc] <= accum[oc] + shifted_res;
                     end
 
-                    if (bias_valid_r) begin
+                    if (bias_valid_r2) begin
                     logit_arr[oc] <= accum[oc] + $signed({{20{rom_data[11]}}, rom_data});
                     if (oc == OUT_SIZE - 1) begin
                         state <= ST_OUTPUT;
