@@ -2,7 +2,7 @@
 
 A fully synthesisable FPGA hardware accelerator for real-time ECG cardiac rhythm classification, implemented in Verilog and targeting the Zedboard Zynq XC7Z020. Replicates the architecture from [Loh et al., ASAP 2020] with a complete RTL pipeline from raw ECG signal to predicted class label.
 
-**Achieves 75% classification accuracy in post-synthesis simulation at 83 MHz.**
+**Achieves 75% classification accuracy in post-synthesis simulation at 100 MHz.**
 
 ---
 
@@ -182,5 +182,5 @@ Cross-validated against Verilog simulation output at each pipeline stage.
 ## Target Device
 
 Zedboard Zynq XC7Z020-CLG484-1
-- Clock: 83 MHz
+- Clock: 100 MHz
 - Interface: AXI-Lite (planned) / direct port (current)
