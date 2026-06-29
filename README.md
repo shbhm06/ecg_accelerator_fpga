@@ -46,7 +46,7 @@ IITR_project_Shubham/
 │   └── ecg_system_wrapper.hwh       # Hardware handoff file
 │
 ├── Weights and Samples/
-│   ├── weights_final.coe            # Q8.8 fixed-point weights/biases for all 5 layers
+│   ├── weights_final.coe            # Q4.8 fixed-point weights/biases for all 5 layers
 │   └── samples/
 │       ├── ecg_normal.hex           # 6 windows × 18000 samples, class 0
 │       ├── ecg_af.hex                # 6 windows × 18000 samples, class 1
@@ -103,8 +103,8 @@ Design meets timing closure with zero violations at the target 65 MHz clock.
 | 2 | DWT preprocessing, normalization, stratified train/test split |
 | 3 | `ECGModel` definition (PyTorch, matches reference paper Table I) |
 | 4 | 5-fold stratified CV training, 10 seeds/fold, polarity-flip augmentation |
-| 5 | BN folding into conv weights, Q8 fixed-point simulation, activation profiling |
-| 6 | Export weights/biases as Q8.8 hex (`weights.hex`) |
+| 5 | BN folding into conv weights, fixed-point simulation, activation profiling |
+| 6 | Export weights/biases as Q4.8 hex (`weights.hex`) |
 | 7 | Export top-confidence test signals as 12-bit hex stimulus files |
 | 8 | Verify exported hex files reproduce correct classification |
 
@@ -129,8 +129,8 @@ Design meets timing closure with zero violations at the target 65 MHz clock.
 
 ## Supplementary Material
 
-- **Full source code (compiled):** [Google Drive link — add here]
-- **Hardware demonstration video** (PYNQ-Z2 classifying all 24 test windows in real time): [Google Drive link — add here]
+- **Full source code (compiled):** [Google Drive folder](https://drive.google.com/drive/folders/1dFimWZfFsip886fi_u340XvsGY96q8ri?usp=sharing)
+- **Hardware demonstration video** (PYNQ-Z2 classifying all 24 test windows in real time): [Google Drive folder](https://drive.google.com/drive/folders/1e4fYbojsFO45i1OM_fsGQOWlWUhlaWBA?usp=sharing)
 
 ---
 
