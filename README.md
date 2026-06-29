@@ -1,186 +1,140 @@
-# ECG Cardiac Classification Accelerator — Zedboard Zynq XC7Z020
+# ECG DNN Hardware Accelerator (PYNQ-Z2 / Zynq XC7Z020)
 
-A fully synthesisable FPGA hardware accelerator for real-time ECG cardiac rhythm classification, implemented in Verilog and targeting the Zedboard Zynq XC7Z020. Replicates the architecture from [Loh et al., ASAP 2020] with a complete RTL pipeline from raw ECG signal to predicted class label.
+A hardware accelerator for real-time ECG arrhythmia classification, implemented in Verilog and deployed on a PYNQ-Z2 board. The design takes a raw 12-bit ECG sample stream over AXI4-Stream, runs it through a 4-level DWT decomposition and a 4-layer CNN + dense classifier, and outputs one of four classes: **Normal, AF (Atrial Fibrillation), Other, Noise**.
 
-**Achieves 75% classification accuracy in post-synthesis simulation at 100 MHz.**
+This repository accompanies the project report and contains the complete RTL source, the Python/PyTorch training & quantization pipeline, the PYNQ test script, and supporting hex/weight files.
 
 ---
 
-## Pipeline Overview
+## System Overview
 
 ```
-Raw ECG (18000 samples, 1ch)
-        ↓
-   DWT Preprocessing
-   (db2, 4-level decomposition → A4 + D4, 2ch × 1127)
-        ↓
-   Conv Block 1  (1ch → 10ch, kernel=5, MaxPool 1×3)
-        ↓
-   Conv Block 2  (10ch → 24ch, kernel=5, MaxPool 1×3)
-        ↓
-   Conv Block 3  (24ch → 24ch, kernel=5, MaxPool 1×3)
-        ↓
-   Conv Block 4  (24ch → 24ch, kernel=5, MaxPool 1×3)
-        ↓
-   Dense Layer   (264 → 4, fully connected)
-        ↓
-   Argmax        → Class Label (Normal / AF / Other / Noise)
+PS (ARM) --AXI4-Stream--> [ecg_axi_wrapper] --> [ecg_accelerator_top] --> result --> PS (ARM)
+                                                       |
+                                  dwt_4level -> interleaver -> conv1 -> conv2 -> conv3 -> conv4 -> dense_layer -> argmax4
 ```
 
----
-
-## Architecture Details
-
-### Fixed-Point Format
-All arithmetic is Q4.8 fixed-point (24-bit datapath):
-- 1 sign bit, 15 integer bits (accumulation headroom), 8 fractional bits
-- Weights stored as 12-bit Q4.8 in block ROM (`.coe` initialised BRAM)
-- Multiply: Q4.8 × Q4.8 → Q8.16, right-shifted by 8 to return to Q4.8
-
-### DWT Preprocessing
-- Daubechies-2 (db2) wavelet, 4-level decomposition
-- FIR filter implementation with registered pipeline stages
-- Outputs: A4 approximation coefficients + D4 detail coefficients
-- Validated against fixed-point Python reference model
-
-### CNN Layers (`cnn_layers.v`)
-Each `conv_block` module implements:
-- **Input buffering:** `x_buf[IN_CH]` latches one sample per channel per clock
-- **Shift register:** `sr_flat[IN_CH×5]` — flattened 1D array holding last 5 time-steps per channel
-- **FSM (3 states):**
-  - `ST_IDLE` — waits for `all_ch_received`, drops first 4 transient windows (`startup_cnt`)
-  - `ST_COMPUTE` — sequential MAC over all `IN_CH × 5` weight-sample pairs, then bias fetch. Runs one output channel at a time, 52 cycles per channel
-  - `ST_POOL` — ReLU + MaxPool1d(3,3). Accumulates 3 ReLU outputs per channel across 3 consecutive input windows, emits max
-- **BRAM pipeline:** 1-cycle ROM read latency absorbed by `sr_pipe_r`, `mac_valid_r`, `bias_valid_r` pipeline registers
-- **Output process:** Independent `always` block scans `pool_rdy[]` flags and streams results to next layer
-
-| Layer | Kernel | Channels (I/O) | FM Size (I/O) | Weights |
-|-------|--------|----------------|---------------|---------|
-| Conv1 | 2×5    | 1 → 10         | 2×1127 → 1119 | 110     |
-| Pool1 | 1×3    | 10 → 10        | 1119 → 374    | —       |
-| Conv2 | 1×5    | 10 → 24        | 374 → 370     | 1224    |
-| Pool2 | 1×3    | 24 → 24        | 370 → 123     | —       |
-| Conv3 | 1×5    | 24 → 24        | 123 → 119     | 2904    |
-| Pool3 | 1×3    | 24 → 24        | 119 → 39      | —       |
-| Conv4 | 1×5    | 24 → 24        | 39 → 35       | 2904    |
-| Pool4 | 1×3    | 24 → 24        | 35 → 11       | —       |
-
-### Dense Layer (`dense_layer.v`)
-- Fully connected 264 → 4 layer
-- **3 states:** `ST_COLLECT` (buffer all 264 inputs), `ST_COMPUTE` (264 MACs × 4 classes = 1056 MACs), `ST_OUTPUT` (emit logits)
-- Index transpose: PyTorch weight layout `[out_ch][in_ch][time]` remapped to hardware buffer layout `[time][channel]`
-- Outputs 4 raw logits (no softmax — argmax sufficient for classification)
-
-### Argmax (`argmax4.v`)
-- Priority-encoded combinational comparison of 4 logits
-- Registered output: `class_out` (2-bit), `valid_out`
-- Classes: 0=Normal, 1=AF, 2=Other, 3=Noise
-
-### Weight Memory
-Single shared ROM (`weight_rom`) initialised from `.coe` file:
-
-| Layer  | Base Address | Entries |
-|--------|-------------|---------|
-| Conv1  | 0           | 110     |
-| Conv2  | 110         | 1224    |
-| Conv3  | 1334        | 2904    |
-| Conv4  | 4238        | 2904    |
-| Dense  | 7142        | 1060    |
-| **Total** |          | **8242** |
-
-Batch normalisation folded into conv weights before export — no BN hardware needed at inference.
-
----
-
-## Simulation Results
-
-Tested on 4 recordings from the **CinC 2017 dataset**, one per class:
-
-| Recording | True Class | Predicted Class | Result |
-|-----------|-----------|-----------------|--------|
-| ecg_normal | Normal    | Normal          | ✓      |
-| ecg_af     | AF        | AF              | ✓      |
-| ecg_other  | Other     | Other           | ✓      |
-| ecg_noise  | Noise     | Noise           | ✓      |
-
-**75% classification accuracy — validated against Python reference model (Google Colab).**
+- **Input:** 12-bit signed ECG samples, streamed via AXI4-Stream DMA from the Zynq PS.
+- **Output:** 2-bit class index (0=Normal, 1=AF, 2=Other, 3=Noise), streamed back via AXI4-Stream.
+- **Clock:** PL clock sourced from the Zynq PS at 65 MHz.
 
 ---
 
 ## Repository Structure
 
 ```
-├── src/
-│   ├── dwt_fir.v          # DWT lowpass FIR filter
-│   ├── dwt_fir_hp.v       # DWT highpass FIR filter
-│   ├── dwt_4level.v       # 4-level DWT cascade
-│   ├── cnn_layers.v       # Conv blocks with FSM, MaxPool
-│   ├── dense_layer.v      # Fully connected layer + argmax
-│   └── top.v              # Top-level wrapper
-├── tb/
-│   └── tb_top.v           # Testbench
-├── weights/
-│   └── weight_rom.coe     # All weights in Xilinx COE format
-├── data/
-│   ├── ecg_normal.coe     # Normal sinus rhythm (18000 samples)
-│   ├── ecg_af.coe         # Atrial fibrillation
-│   ├── ecg_other.coe      # Other rhythm
-│   └── ecg_noise.coe      # Noisy recording
-├── python/
-│   ├── reference_model.ipynb   # Python reference model (Colab)
-│   └── export_weights.py       # Weight export to COE format
-├── constraints/
-│   └── zedboard.xdc
-└── README.md
+IITR_project_Shubham/
+├── BD/
+│   ├── ecg_system.bd                # Vivado IP Integrator block design
+│   └── ecg_bd.png                   # Block design screenshot
+│
+├── RTL/
+│   ├── ecg_axi_stream_wrapper.v     # AXI4-Stream protocol shell (S_AXIS/M_AXIS, throttling, TLAST fix)
+│   ├── ecg_accelerator_top.v        # Top-level classifier core (no AXI awareness)
+│   ├── dwt_4level.v                 # 4-level DWT cascade (dwt_stage + sat_trunc20to12)
+│   ├── dwt_fir.v                    # db2 low-pass/high-pass FIR filters (dwt_fir_lp, dwt_fir_hp)
+│   ├── cnn_layers.v                 # Generic conv_block (MAC + ReLU + max-pool), instantiated ×4
+│   └── dense_layer.v                # Fully-connected layer (dense_layer) + argmax4 classifier
+│
+├── TB/
+│   └── tb_ecg_accelerator.v         # Self-checking testbench (tb_ecg_wrapper)
+│
+├── Python/
+│   ├── ecg_reference_model.ipynb    # Training, BN folding, quantization, hex export (Cells 1–8)
+│   ├── python_PYNQ_env.ipynb        # On-board PYNQ-Z2 test notebook (DMA transfer + accuracy check)
+│   ├── ecg_system_wrapper.bit       # Bitstream
+│   └── ecg_system_wrapper.hwh       # Hardware handoff file
+│
+├── Weights and Samples/
+│   ├── weights_final.coe            # Q8.8 fixed-point weights/biases for all 5 layers
+│   └── samples/
+│       ├── ecg_normal.hex           # 6 windows × 18000 samples, class 0
+│       ├── ecg_af.hex                # 6 windows × 18000 samples, class 1
+│       ├── ecg_other.hex             # 6 windows × 18000 samples, class 2
+│       └── ecg_noise.hex             # 6 windows × 18000 samples, class 3
+│
+└── docs/
+    ├── timing_summary.png            # WNS/TNS/WHS/THS report
+    └── utilization_summary.png       # LUT/FF/BRAM/URAM/DSP report
 ```
 
----
-
-## How to Run Simulation (Vivado)
-
-1. Clone the repo
-2. Open Vivado → Create Project → Add all files from `src/` and `tb/`
-3. Add `weights/weight_rom.coe` and `data/ecg_*.coe` as simulation sources
-4. Set `tb_top.v` as top-level simulation file
-5. Run Behavioural Simulation
-6. Check console for logit outputs and `class_out` signal
+> **Note:** `ecg_system.bd` documents the block design (AXI DMA ↔ wrapper ↔ Zynq PS wiring) but is **not standalone-runnable** on its own. The exported `ecg_system_wrapper.bit` bitstream and matching `ecg_system_wrapper.hwh` hardware handoff file (both in `Python/`) are what `Overlay(...)` actually loads on the PYNQ-Z2 to reproduce the hardware demo — see [Reproducing the Hardware Demo](#reproducing-the-hardware-demo) below.
 
 ---
 
-## How to Synthesise
+## Pipeline Stages
 
-1. Add `constraints/zedboard.xdc`
-2. Set `top.v` as top-level
-3. Run Synthesis → Implementation → Generate Bitstream
-4. Target: Zedboard Zynq XC7Z020-CLG484-1
+| Stage | Module | Function |
+|---|---|---|
+| 1 | `ecg_axi_wrapper` | AXI4-Stream I/O, sample throttling, TLAST framing |
+| 2 | `dwt_4level` | 4-level db2 wavelet decomposition → A4/D4 coefficients |
+| 3 | (interleaver, inside `ecg_accelerator_top`) | Merges A4/D4 into one 2-channel stream |
+| 4 | `conv_block` ×4 | Convolution + ReLU + max-pool(3), generic & reused per layer |
+| 5 | `dense_layer` | 264 → 4 fully-connected layer (handles PyTorch/hardware transpose) |
+| 6 | `argmax4` | Picks the highest of 4 logits → final 2-bit class |
 
----
-
-## Python Reference Model
-
-Located in `python/reference_model.ipynb`. Implements:
-- db2 DWT preprocessing (fixed-point)
-- 4 conv blocks with BN folding, Q4.8 quantisation
-- Dense layer
-- Weight export to Xilinx `.coe` format (outer=out_ch, middle=in_ch, inner=tap)
-
-Cross-validated against Verilog simulation output at each pipeline stage.
+Full per-module explanations (block-by-block, with formulas) are in the accompanying project report.
 
 ---
 
-## Key Design Decisions
+## Implementation Results (Vivado, XC7Z020, 65 MHz)
 
-- **Q4.8 fixed-point** throughout — balances precision and hardware cost
-- **Sequential MAC** (one multiply per cycle) instead of parallel — minimises DSP48 usage
-- **BRAM for weights** — 8242 entries too large for LUT RAM
-- **Distributed RAM for dense input buffer** — 264 entries, needs random access
-- **BN folding** — eliminates batch norm hardware entirely at inference
-- **startup_cnt** — drops first 4 conv outputs to match PyTorch `padding=0` behaviour
+| Metric | Value |
+|---|---|
+| WNS (Worst Negative Slack) | 1.820 ns |
+| TNS (Total Negative Slack) | 0.000 ns |
+| WHS (Worst Hold Slack) | 0.010 ns |
+| THS (Total Hold Slack) | 0.000 ns |
+| LUT | 15,693 |
+| FF | 26,789 |
+| BRAM | 23 |
+| URAM | 0 |
+| DSP | 25 |
+
+Design meets timing closure with zero violations at the target 65 MHz clock.
 
 ---
 
-## Target Device
+## Python / Training Pipeline (`ecg_reference_model.ipynb`)
 
-Zedboard Zynq XC7Z020-CLG484-1
-- Clock: 100 MHz
-- Interface: AXI-Lite (planned) / direct port (current)
+| Cell | Purpose |
+|---|---|
+| 1 | Download CinC2017 ECG dataset to Google Drive |
+| 2 | DWT preprocessing, normalization, stratified train/test split |
+| 3 | `ECGModel` definition (PyTorch, matches reference paper Table I) |
+| 4 | 5-fold stratified CV training, 10 seeds/fold, polarity-flip augmentation |
+| 5 | BN folding into conv weights, Q8 fixed-point simulation, activation profiling |
+| 6 | Export weights/biases as Q8.8 hex (`weights.hex`) |
+| 7 | Export top-confidence test signals as 12-bit hex stimulus files |
+| 8 | Verify exported hex files reproduce correct classification |
+
+---
+
+## Reproducing the Hardware Demo
+
+1. Copy `ecg_system_wrapper.bit` and `ecg_system_wrapper.hwh` (from `Python/`) onto the PYNQ-Z2 board (e.g. `/home/xilinx/`).
+2. Ensure the BRAM weight initialization uses `weights_final.coe` (from `Weights and Samples/`), either pre-loaded into the bitstream or regenerated via the IP if rebuilding from source.
+3. Copy the four stimulus files from `Weights and Samples/samples/` (`ecg_normal.hex`, `ecg_af.hex`, `ecg_other.hex`, `ecg_noise.hex`) onto the board alongside `python_PYNQ_env.ipynb`.
+4. Open and run `python_PYNQ_env.ipynb` on the board's Jupyter interface.
+5. The notebook reloads the bitstream before every test window, streams each 18000-sample window over DMA, and prints a pass/fail line per window plus a final accuracy summary.
+
+---
+
+## Verification
+
+- **Simulation:** `tb_ecg_wrapper` (in `tb_ecg_accelerator.v`) drives all 24 test windows (6 per class) through `ecg_axi_wrapper` via simulated AXI4-Stream transactions, comparing the decoded `class_out` against the known label for each window and printing a per-window pass/fail log plus a final accuracy summary.
+- **On-hardware:** `python_PYNQ_env.ipynb` repeats the same 24-window test on the physical PYNQ-Z2 board via real DMA transfers, confirming hardware results match simulation.
+
+---
+
+## Supplementary Material
+
+- **Full source code (compiled):** [Google Drive link — add here]
+- **Hardware demonstration video** (PYNQ-Z2 classifying all 24 test windows in real time): [Google Drive link — add here]
+
+---
+
+## References
+
+- Loh, B.C.S. et al., *"Deep Learning for Cardiac Arrhythmia Detection,"* ASAP 2020 — reference CNN architecture (Table I).
+- AF Classification from a Short Single Lead ECG Recording — PhysioNet/CinC Challenge 2017 dataset.
